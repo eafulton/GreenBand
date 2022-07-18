@@ -1,0 +1,543 @@
+---
+title: "Lenfest model indicators - calculation for EwE models"
+author: "Linda Thomas, Camilla Novaglio, Beth Fulton & Javier Porobic"
+date: "19/07/2021"
+output: html_document
+editor_options: 
+chunk_output_type: console
+---
+
+# Indicator calculation for EwE models
+This document provides the scripts to run the Priority 1 indicators for EwE models.
+These are calculated using the model output files. Some additional information may be required to be collated.
+
+# Clean up before you start
+```{r}
+rm(list=ls())
+```
+
+# load libraries
+Below are the libraries to be loaded - first it runs the function that will check
+# if the library is installed or not and if not then installs it so ready for usechecks if installed or not and if not then installs
+```{r}
+install_load <- function (this_package)  {
+    package <- c(this_package)
+    if(package %in% rownames(installed.packages()))
+        do.call('library', list(package))
+    ## if package is not installed locally, download, then load
+    else {
+        install.packages(package, dependencies=TRUE)
+        do.call("library", list(package))
+    }
+}
+
+### load/install libraries ###
+# Data handling and table reshaping
+install_load("tidyverse")
+install_load("reshape2")
+install_load("devtools")
+install_load("MASS")
+install_load("dplyr")
+#install_load("Tool.R")
+# Plotting
+install_load("ggplot2")
+install_load("RColorBrewer")
+#install_load("ggbiplot")
+install_load("plot3D")
+install_load("plotly")
+# PCA and Clustering
+install_load("factoextra")
+install_load("FactoMineR")
+install_load("corrplot")
+install_load("ape")
+install_load("plot3D")
+install_load("heatmaply")
+install_load("data.table")
+# Timeserise analysis
+install_load("zoo")
+#Other
+install_load("Rcpp")
+install_load("inline")
+install_load("vegan")
+install_load("patchwork")
+install_load("cowplot")
+install_load("ggpubr")
+install_load("matrixStats")
+install_load("drc")
+install_load("viridis")
+install_load("gridExtra")
+install_load("cowplot")
+#Network related
+install_load("data.table")
+install_load("magrittr")
+install_load("qgraph")
+install_load("visNetwork")
+install_load("intergraph")
+install_load("tidygraph")
+#install_load("network")
+install_load("igraph")
+```
+
+# Helpful fucntion for loading EwE files
+```{r}
+##' @title Skip line function. this automatically get the number of rows based on the ewe version
+##' @param file EwE .csv output file
+##' @return Number of lines to skip
+##' @author Javier Porobic
+skip_lines <- function(file){
+    strs  <- readLines(file)
+    lines <- grep('year\\\\group,', strs) -1
+    return(lines)
+}
+```
+
+# Data collection  
+Please set the working directory to where the model output files are.  
+
+Additional information to be provided by the modeller:  
+* A list of species used in your model in csv format (e.g ID, Group). This can be taken from the model parameters file used to set up the model.  
+* L inf for each species in the model. This is taken from the model parameter file. Calculate the mean L infinity for the species group.
+* size categories for each species in csv format (e.g. species_id, Group, size). The information is taken from the model parameters file. Categorise each group into L, S or split depending on total length (small = <30cm, large = >50cm, SPLIT = 30-50cm).
+
+```{r}
+
+# Palettes to use
+tscolor <- "red4"
+aggtscolor <-"deepskyblue4"
+aggtscolor2 <- "deepskyblue"
+textsize <- 16
+linesize <- 3
+nPanel <- 12
+use_weights <- 1
+chl_from_file <- 0
+bo_in_same_file <- 0
+bo_conservative <- 1
+bo_yr_row <- 0 # Set to 0 if you want the final row of the file
+## Area of model in km2 (whole of SESSF = 3700000), EBS smaller
+area_model <- 940000
+
+# Define the relevant directories - all these paths (including the output directories) must already exist
+mainDir <- "Set_main_directory_here_it_is_directory_above_the_EwE_output_folders"
+
+OutsubDirStep1 <- "Output_of_analysis_folder"
+BosubDir <- "Directory_name_for_no_fishing_case"
+
+InputsubDir  <- "Folder_name_of_scenario_to_analyse"
+
+OutsubDirStep2 <- "Where_you_want_to_save_analysis_outputs"
+
+```
+
+# Load the data
+```{r}
+# set working directory - change to where your model output files are.
+setwd(mainDir)
+OutsubDirStep3 <- paste(OutsubDirStep1,"/",OutsubDirStep2,sep="")
+OutDir <- paste(mainDir,"/",OutsubDirStep3,sep="")
+#skip_this  <- header_row_ID - 1
+
+# Create output directory if required
+ifelse(!dir.exists(file.path(mainDir, OutsubDirStep1)), dir.create(file.path(mainDir, OutsubDirStep1)), FALSE)
+ifelse(!dir.exists(file.path(mainDir, OutsubDirStep3)), dir.create(file.path(mainDir, OutsubDirStep3)), FALSE)
+if(!dir.exists(file.path(OutDir))) dir.create(file.path(OutDir))
+
+# read in EwE data
+# find model start year from an output file
+BioFile <- paste(mainDir,"/",InputsubDir,"/","biomass_annual.csv",sep="")
+d <- read.csv(BioFile, header = FALSE)
+s_year = d[c(1:7), ];               # this reads the first 7 rows of the header to give the start year of the model.
+
+# catch data
+CatchFile <- paste(mainDir,"/",InputsubDir,"/","catch_annual.csv",sep="")
+skip_this <- skip_lines(CatchFile)
+catch <- read.csv(CatchFile, header = T, skip = skip_this, check.names = FALSE) # because csv file has headers - will need to skip the first 9 rows; check names makes sure an X isn't added before the number for the species
+names(catch)[1] <- 'Year'   # changes the name of the first column to year instead of year//group
+
+# aggregate landings data
+LandFile <- paste(mainDir,"/",InputsubDir,"/","landings_annual.csv",sep="")
+landings <- read.csv(LandFile, header = T, skip = skip_this, check.names = FALSE) # because csv file has headers - will need to skip the first 9 rows; check names makes sure an X isn't added before the number for the species
+names(landings)[1] <- 'Year'   # changes the name of the first column to year instead of year//group
+names(landings)[3] <- 'species_id'   # changes the name of the first column to year instead of year//group
+
+# biomass data
+biomass <- read.csv(BioFile, header = T, skip = skip_this, check.names = FALSE)
+names(biomass)[1] <- 'Year'
+
+# total catch and landings data per fleet
+RemFile <- paste(mainDir,"/",InputsubDir,"/","catch-fleet-group_annual.csv",sep="")
+removals_fleet <- read.csv(RemFile, header = T, skip = skip_this, check.names = FALSE)
+names(removals_fleet)[1] <- 'Year'
+LFFile <- paste(mainDir,"/",InputsubDir,"/","landings_annual.csv",sep="")
+landings_fleet <- read.csv(LFFile, header = T, skip = skip_this, check.names = FALSE)
+names(landings_fleet)[1] <- 'Year'
+
+# species id - put names
+id <- read.csv("Species_ID.csv") # You will need to put in the name of your species list csv file here
+nSPName <- length(unique(id$Group))
+SpeciesNames <- id$Group
+
+# fleet id - put names
+idf <- read.csv("Fleet_ID.csv") # You will need to put in the name of your species list csv file here
+nFName <- length(unique(idf$FleetName))
+FleetNames <- idf$FleetName
+
+# mortality data
+MortFile <- paste(mainDir,"/",InputsubDir,"/","mort-fleet-group_annual.csv",sep="")
+mortality_fleet <- read.csv(MortFile, header = T, skip = skip_this, check.names = FALSE)
+names(mortality_fleet)[1] <- 'Year'
+MortFile <- paste(mainDir,"/",InputsubDir,"/","mortality_annual.csv",sep="")
+mortality <- read.csv(MortFile, header = T, skip = skip_this, check.names = FALSE)
+names(mortality)[1] <- 'Year'
+
+# trophic level data
+TLFile <- paste(mainDir,"/",InputsubDir,"/","tl_annual.csv",sep="")
+tl_annual <- read.csv(TLFile, header = T, skip = skip_this, check.names = FALSE)
+names(tl_annual)[1] <- 'Year'   # changes the name of the first column to year instead of year//group
+
+# weight data
+WeightFile <- paste(mainDir,"/",InputsubDir,"/","weight_annual.csv",sep="")
+weight_annual <- read.csv(WeightFile, header = T, skip = skip_this, check.names = FALSE)
+names(weight_annual)[1] <- 'Year'   # changes the name of the first column to year instead of year//group
+
+# chl file if present
+if (chl_from_file > 0) {
+  ChlFile <- paste(mainDir,"/",InputsubDir,"/","chl.csv",sep="")   # Assumes a format of Year chl
+  dfChl <- read.csv(ChlFile, header = T, check.names = FALSE)
+  
+  # make sure has columns Year and Chl
+}
+
+# convert data into a data frame and pivot tables to tidy
+bio <- as.data.frame(biomass) %>% 
+  pivot_longer(-Year, names_to = "species_id", values_to = "biomass_tonnes")
+bio$biomass_tonnes <- area_model * bio$biomass_tonnes
+
+cat <- as.data.frame(catch) %>% 
+  pivot_longer(-Year, names_to = "species_id", values_to = "catch_tonnes")
+cat$catch_tonnes <- area_model * cat$catch_tonnes
+
+aggland <- landings %>%
+  group_by(Year, species_id) %>%
+  dplyr::summarise(landings_tonnes = sum(value))
+aggland$landings_tonnes <- area_model * aggland$landings_tonnes
+aggland$species_id <- as.character(aggland$species_id)
+
+tl <- as.data.frame(tl_annual) %>% 
+  pivot_longer(-Year, names_to = "species_id", values_to = "trophic_level")
+
+land <- as.data.frame(landings_fleet) %>% 
+  dplyr::rename(species_id = group) %>% # rename group to species_id
+  dplyr::rename(fleet_landing_tonnes = value) %>% # rename value to landing_tonnes
+  mutate(species_id = as.character(species_id)) %>% 
+  unique()
+land$fleet_landing_tonnes <- area_model * land$fleet_landing_tonnes
+
+removals <- as.data.frame(removals_fleet) %>% 
+  dplyr::rename(species_id = group) %>% # rename group to species_id
+  dplyr::rename(fleet_removals_tonnes = value) %>% # rename value to landing_tonnes
+  mutate(species_id = as.character(species_id)) %>% 
+  unique()
+removals$fleet_removals_tonnes <- area_model * removals$fleet_removals_tonnes
+
+# add in species names to the data frame
+## change the COL_ID to species_id so can join
+id2 <- id %>% 
+  dplyr::rename(species_id = ID) %>%  # specify that the dplyr rename is the function you want & rename ID to species_id
+#    select(-COL_ID) %>% # removes the COL_ID column
+  mutate(species_id = as.character(species_id)) %>% # change to character so same as other data frame
+  unique() # make sure only unique values are used.
+
+# merge the catch and biomass into one data frame
+df1tmp <- full_join(bio, cat) # have two columns the same so they will automatically join on these
+df1 <- full_join(df1tmp, aggland)
+df1[is.na(df1)] <- 0
+df <- full_join(df1, id2) # data frame with biomass, catch and species names
+
+# df3 <- full_join(df, land) %>% # data frame with biomass, catch and species names & landings
+#  select(Year, species_id, Group, fleet, biomass_tonnes, catch_tonnes, fleet_landing_tonnes) # reorder the columns so they are easier to read
+
+# New df3 which has landings and total catch per fleet in one file
+df3tmp <- full_join(land, removals)
+
+# Join landings and species names
+df3tmpA <- full_join(df3tmp, id2) 
+df3 <- merge(df3tmpA, idf, by.x = "fleet", by.y = "ID") 
+
+# add species names to trophic level data
+tl_species <- full_join(tl, id2)
+
+# Get reference values
+# Depending on the value of bo_conservative set Bo
+# bo_in_same_file = 1 then take Bs from row bo_yr_row
+# bo_in_same_file = 0 and bo_conservative = 0 then take Bs from the Bo file as dicatted by bo_yr_row
+# bo_in_same_file = 0 and bo_conservative = 1 then take max(first row of biofile, row of Bo file)
+
+if(bo_in_same_file < 1){
+  # Load Bo and Mo from files
+  #bo_skip_this <- bo_header_row_ID - 1
+  BoBioFile <- paste(mainDir,"/",BosubDir,"/","biomass_annual.csv",sep="")
+  bo_skip_this <- skip_lines(BoBioFile)
+  BoBio <- read.csv(BoBioFile, header = T, skip = bo_skip_this, check.names = FALSE)
+  MoMortFile <- paste(mainDir,"/",BosubDir,"/","mortality_annual.csv",sep="")
+  MoMort <- read.csv(MoMortFile, header = T, skip = bo_skip_this, check.names = FALSE)
+  names(BoBio)[1] <- 'Year'
+  names(MoMort)[1] <- 'Year' 
+  if(bo_yr_row < 1) {
+    bo_yr_row <- length(BoBio[,1])
+    RefB <- BoBio[bo_yr_row,]
+    RefM <- MoMort[bo_yr_row,]
+    
+  } else {
+    RefB <- BoBio[bo_yr_row,]
+    RefM <- MoMort[bo_yr_row,]
+  }
+  
+  if(bo_conservative > 0) {
+    altB1 <- as.data.frame(RefB) %>% 
+      pivot_longer(-Year, names_to = "species_id", values_to = "RefB")
+    altBtmp <- biomass[1,]
+    altB2 <- as.data.frame(altBtmp) %>% 
+      pivot_longer(-Year, names_to = "species_id", values_to = "RefB")
+    altB1$Year <- RefM[1,1]
+    altB2$Year <- RefM[1,1]
+    dftmp <- merge(altB1, altB2, by=c("Year","species_id"))
+    dftmp$RefB <- ifelse(dftmp$RefB.x > dftmp$RefB.y, dftmp$RefB.x, dftmp$RefB.y)
+    dfRefB <- dftmp
+    dfRefB <- subset (dfRefB, select = -c(Year, RefB.x, RefB.y))
+  } else {
+    dfRefB <- as.data.frame(RefB) %>% 
+      pivot_longer(-Year, names_to = "species_id", values_to = "RefB")
+    dfRefB <- subset (dfRefB, select = -c(Year))
+  }
+  dfRefM <- as.data.frame(RefM) %>% 
+    pivot_longer(-Year, names_to = "species_id", values_to = "RefM")
+  dfRefM <- subset (dfRefM, select = -c(Year))
+  
+} else {
+  # Assumes has sensible reference year rown number
+  RefB <- biomass[bo_yr_row,]
+  RefM <- mortality[bo_yr_row,]
+  
+  dfRefB <- as.data.frame(RefB) %>% 
+    pivot_longer(-Year, names_to = "species_id", values_to = "RefB")
+  dfRefB <- subset (dfRefB, select = -c(Year))
+  dfRefM <- as.data.frame(RefM) %>% 
+    pivot_longer(-Year, names_to = "species_id", values_to = "RefM")
+  dfRefM <- subset (dfRefM, select = -c(Year))
+
+}
+dfRef <- merge(dfRefM, dfRefB, by=c("species_id")) # Intentional reuse
+dfRef$RefBo <- area_model * dfRef$RefB
+
+```
+
+# Greenband
+Follows the approach of Heath - where the allowed catch is proportional to production
+```{r}
+# Set up reference values
+RefVal <- dfRef
+RefVal$RefP <- RefVal$RefB * RefVal$RefM
+idRef <- merge(id2, RefVal, by=c("species_id"))
+idRef <- idRef %>% dplyr::filter(IsDetritus < 1)
+
+# Estimate the initial slope
+idRef$logP <- log10(idRef$RefP)
+idRef$logB <- log10(idRef$RefB)
+linreg <- lm(formula = logB ~ logP, data = idRef)
+matrix_coef <- summary(linreg)$coefficients 
+reg_slope <- round(matrix_coef[2,1],3)
+reg_const <- round(matrix_coef[1,1],3)
+band_slope <- reg_slope + 1.0   # This is the slope of the grend band for the rest of the work
+lm_equation <- paste("y = ", reg_const, " + ", reg_slope, " x",sep="")
+this_r2 <- round(summary(linreg)$r.squared,3)
+lm_R2 <- paste("R2 = ",this_r2,sep="")
+
+ymin <- 1e-8
+xmin <- 1e-6
+ymax <- 1e+5
+xmax <- 1e+5
+lymin <- log10(1e-8)
+lxmin <- log10(1e-6)
+lymax <- log10(1e+5)
+lxmax <- log10(1e+5)
+
+outaplot <- paste(OutDir,"/Green_Band_Reference_Plot.png",sep="")
+ggplot(data = idRef, aes(x = RefP, y = RefB)) + 
+    geom_point() +
+    geom_smooth(method='lm') +
+    scale_x_log10(limits=c(xmin, xmax)) + scale_y_log10(limits=c(ymin, ymax)) +
+    labs(x="Production", y = "Biomass") +
+    annotate("text", x=1e-4, y=3e+4, label= lm_equation) + 
+    annotate("text", x = 1e-4, y=1e+4, label = lm_R2) +
+    theme(axis.text=element_text(size=16,face="bold"), axis.title=element_text(size=20,face="bold"))
+ggsave(file=outaplot)
+
+# Get production once fished
+production <- mortality * biomass
+production$Year <- biomass$Year
+dfProd <- as.data.frame(production) %>% 
+  pivot_longer(-Year, names_to = "species_id", values_to = "Production")
+dftmp <- full_join(dfProd, id2) # Reuse old temporary df
+dfBand <- full_join(dftmp, df) 
+dfBand <- dfBand %>% dplyr::filter(Class_Code > 0)
+
+# Rate in comparison to green band
+# Equations for key lines
+# Max_allowable  C = 0.5 * P
+# Max_green_band  C = P ^ band_slope
+# Min_green_band  C = C_Max_green_band * 0.01
+# Realised Max_green_band  C = min(Max_allowable, Max_green_band)
+# Realised Min_green_band  C = min(Max_allowable, Min_green_band)
+# Light 1 - L
+# Acceptable 2 - A
+# Fail 3 - F
+  
+dfBand$MaxAllow <- 0.5 * dfBand$Production
+dfBand$MaxGreenBand <- dfBand$Production ^ band_slope
+dfBand$MinGreenBand <- dfBand$MaxGreenBand * 0.01
+dfBand$RealMax <- ifelse(dfBand$MaxAllow < dfBand$MaxGreenBand, dfBand$MaxAllow , dfBand$MaxGreenBand)
+dfBand$RealMin <- ifelse(dfBand$MaxAllow < dfBand$MinGreenBand, dfBand$MaxAllow , dfBand$MinGreenBand)
+dfBand$catch <- dfBand$catch_tonnes / area_model
+#dfBand$DistortScore <- ifelse(dfBand$catch_tonnes < dfBand$RealMin, "L", (ifelse(dfBand$catch_tonnes >= dfBand$RealMax, "F", "A")))
+dfBand$DistortScore <- ifelse(dfBand$catch < dfBand$RealMin, "L", (ifelse(dfBand$catch >= dfBand$RealMax, "F", "A")))
+  
+dfScored <- merge(dfBand, dfRef, by=c("species_id"))
+names(dfScored)[names(dfScored) == "species_id.x"] <- "species_id"
+names(dfScored)[names(dfScored) == "Classification.x"] <- "Classification"
+names(dfScored)[names(dfScored) == "Class_Code.x"] <- "Class_Code"
+
+dfScored$Rel_B <- dfScored$biomass_tonnes / dfScored$RefBo
+dfScored$Min_B <- ifelse(dfScored$Class_Code == 1, 0.5, 
+                           (ifelse(dfScored$Class_Code == 2, 0.3, 
+                                   (ifelse(dfScored$Class_Code == 3, 0.35, 
+                                           (ifelse(dfScored$Class_Code == 4, 0.2, 
+                                                   (ifelse(dfScored$Class_Code == 5, 0.4, 
+                                                           (ifelse(dfScored$Class_Code == 6, 0.4, 0.6)))))))))))
+dfScored$Max_B <- ifelse(dfScored$Class_Code == 1, 0.7, 
+                           (ifelse(dfScored$Class_Code == 2, 0.6, 
+                                   (ifelse(dfScored$Class_Code == 3, 0.4, 
+                                           (ifelse(dfScored$Class_Code == 4, 0.4, 
+                                                   (ifelse(dfScored$Class_Code == 5, 0.5, 
+                                                           (ifelse(dfScored$Class_Code == 6, 0.5, 0.7)))))))))))
+dfScored$B_Score <- ifelse(dfScored$Rel_B > dfScored$Max_B, "L", (ifelse(dfScored$Rel_B <= dfScored$Min_B, "F", "A")))
+  
+# Assumes Thresholds
+# 
+#  CLass    ID    Min   Max
+#
+# Vulnerable  1   0.5   0.7  
+# Habitat     2   0.3   0.6
+# Byproduct   3   0.35  0.4
+# Bycatch     4   0.2   0.4
+# Target      5   0.4   0.5
+# Robust      6   0.4   0.5
+# Hub         7   0.6   0.7
+  
+# Aggregate Results
+dfAggScore_Distort <- dfScored %>% dplyr::count(Year, DistortScore)
+dfAggScore_B <- dfScored %>% dplyr::count(Year, B_Score)
+  
+dfAggScore_Distort <- dfAggScore_Distort %>% dplyr::filter(!is.na(DistortScore))
+dfAggScore_B <- dfAggScore_B %>% dplyr::filter(!is.na(B_Score))
+  
+# Plot Scores through time - as bar plot
+outPlotName <- paste(OutDir,"/GreenBand-aggregate-score.png",sep="")
+ggplot(data = dfAggScore_Distort, aes(x = Year, y = n, fill = DistortScore)) + geom_bar(colour = "black", stat="identity", size = 0.1) +
+    scale_fill_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) + theme_bw() +
+    labs(x="Years", y = "Ratings") +
+    theme(axis.text=element_text(size=16,face="bold"), axis.title=element_text(size=20,face="bold"))
+ggsave(file=outPlotName) 
+
+# Plot Scores through time - as bar plot
+outPlotName <- paste(OutDir,"/GreenBand-aggregate-scoreB.png",sep="")
+ggplot(data = dfAggScore_B, aes(x = Year, y = n, fill = B_Score)) + geom_bar(colour = "black", stat="identity", size = 0.1) +
+    scale_fill_manual(values = c("#00AFBB", "#E7B800", "#FC4E07")) + theme_bw() +
+    labs(x="Years", y = "Ratings") +
+    theme(axis.text=element_text(size=16,face="bold"), axis.title=element_text(size=20,face="bold"))
+ggsave(file=outPlotName) 
+ 
+Bounds <- data.frame(matrix(0, ncol = 6, nrow = 10))
+colnames(Bounds)[1:6] <- c("P","MaxAllow","MaxGreenBand","MinGreenBand","MinC","MaxC")
+listP <- c(1.00E-19, 0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000)
+Bounds$P <- listP
+Bounds$MaxAllow <- 0.5 * Bounds$P
+Bounds$MaxGreenBand <- Bounds$P ^ band_slope
+Bounds$MinGreenBand <- Bounds$MaxGreenBand * 0.01
+Bounds$MaxC <- ifelse(Bounds$MaxAllow < Bounds$MaxGreenBand, Bounds$MaxAllow, Bounds$MaxGreenBand)
+Bounds$MinC <- ifelse(Bounds$MaxAllow < Bounds$MinGreenBand, Bounds$MaxAllow, Bounds$MinGreenBand)
+BoundsMelt <- melt(Bounds,"P") 
+names(BoundsMelt)[2] <- 'Variables'
+names(BoundsMelt)[3] <- 'CValue'
+
+# Per km2 results
+nSpCode <- max(dfScored$Class_Code)
+for (i in 1:nSpCode) {
+  dfThisCode <- dfScored %>% dplyr::filter(Class_Code == i)
+  outPlotName <- paste(OutDir,"/GreenBand-",dfThisCode$Classification[1],"_Per_Area.png",sep="")
+  
+  dfMin <- BoundsMelt %>% dplyr::filter(Variables == "MinC")
+  dfMax <- BoundsMelt %>% dplyr::filter(Variables == "MaxC")
+
+  #ymin <- min(dfThisCode$C) * 0.1
+  #xmin <- min(dfThisCode$P) * 0.1
+  #ymax <- max(dfThisCode$C) * 10.0
+  #xmax <- max(dfThisCode$P) * 10.0
+  
+  ggplot(data = dfThisCode, aes(x = Production, y = catch)) + 
+    geom_point(data = dfThisCode, aes(size = Year, color = Group)) +
+    geom_line(data = dfThisCode, aes(color = Group)) +
+    geom_line(data = dfMin, aes(x = P, y = CValue), linetype = "dashed", color = "black") +
+    geom_line(data = dfMax, aes(x = P, y = CValue), linetype = "dashed", color = "black") +
+    scale_size_continuous(range = c(1, 3)) +
+    scale_x_log10(limits=c(xmin, xmax)) + scale_y_log10(limits=c(ymin, ymax)) +
+    labs(x="Production", y = "Catch") +
+    theme(axis.text=element_text(size=10,face="bold"), axis.title=element_text(size=20,face="bold"))
+  
+  ggsave(file=outPlotName)
+  
+}
+
+## Total (so area corrected) results
+ymin <- 1e-5 
+xmin <- 1e-5
+ymax <- 1e+10
+xmax <- 1e+10
+
+for (i in 1:nSpCode) {
+  dfThisCode <- dfScored %>% dplyr::filter(Class_Code == i)
+  outPlotName <- paste(OutDir,"/GreenBand-",dfThisCode$Classification[1],".png",sep="")
+  
+  dfThisCode$P<- dfThisCode$Production * area_model
+  
+  dfMin <- BoundsMelt %>% dplyr::filter(Variables == "MinC")
+  dfMax <- BoundsMelt %>% dplyr::filter(Variables == "MaxC")
+  
+  dfMin$Pa <- dfMin$P * area_model
+  dfMin$Ca <- dfMin$CValue * area_model
+  dfMax$Pa <- dfMax$P * area_model
+  dfMax$Ca <- dfMax$CValue * area_model
+  
+  write.csv(dfThisCode, file = "Target_Results.csv", row.names = FALSE)
+  write.csv(dfMin, file = "Target_Min.csv", row.names = FALSE)
+  write.csv(dfMax, file = "Target_Max.csv", row.names = FALSE)
+  
+  #ymin <- min(dfThisCode$C) * 0.1
+  #xmin <- min(dfThisCode$P) * 0.1
+  #ymax <- max(dfThisCode$C) * 10.0
+  #xmax <- max(dfThisCode$P) * 10.0
+  
+  ggplot(data = dfThisCode, aes(x = P, y = catch_tonnes)) + 
+    geom_point(data = dfThisCode, aes(size = Year, color = Group)) +
+    geom_line(data = dfThisCode, aes(color = Group)) +
+    geom_line(data = dfMin, aes(x = Pa, y = Ca), linetype = "dashed", color = "black") +
+    geom_line(data = dfMax, aes(x = Pa, y = Ca), linetype = "dashed", color = "black") +
+    scale_size_continuous(range = c(0.5, 2)) +
+    scale_x_log10(limits=c(xmin, xmax)) + scale_y_log10(limits=c(ymin, ymax)) +
+    labs(x="Production", y = "Catch") +
+    guides(col = guide_legend(ncol = 3)) +
+    theme(axis.text=element_text(size=10,face="bold"), axis.title=element_text(size=20,face="bold"))
+  
+  ggsave(file=outPlotName)
+  
+}
+```
